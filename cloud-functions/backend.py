@@ -832,7 +832,9 @@ def home():
         result = get_gallery_list_data(url, tuple(headers.items()))
         if not result: return jsonify({'error': '无法获取页面内容'}), 500
         for gallery in result.get('galleries', []):
-            if 'thumbnail' in gallery and gallery['thumbnail']: gallery['thumbnail_proxy'] = f"/image/proxy?url={gallery['thumbnail']}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
+            gid_token = f"{gallery.get('gid')}_{gallery.get('token')}"
+            gallery['cover_url'] = f"/comic/{gid_token}/cover"
+            gallery['thumbnail_proxy'] = f"/comic/{gid_token}/cover"
         return jsonify({'success': True, **result})
     except Exception as e: logging.error(f"路由 / 出错: {e}"); return jsonify({'error': f'服务器错误: {str(e)}'}), 500
 
@@ -885,13 +887,11 @@ def search(text=None, page=None):
         results = []
         api_url = public_url()
         for gallery in result.get('galleries', []):
-            if 'thumbnail' in gallery and gallery['thumbnail']: 
-                gallery['thumbnail_proxy'] = f"{api_url}/image/proxy?url={gallery['thumbnail']}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
-            
+            gid_token = f"{gallery.get('gid')}_{gallery.get('token')}"
             results.append({
-                'comic_id': f"{gallery.get('gid')}_{gallery.get('token')}",
+                'comic_id': gid_token,
                 'title': gallery.get('title'),
-                'cover_url': gallery.get('thumbnail_proxy') or gallery.get('thumbnail'),
+                'cover_url': f"{api_url}/comic/{gid_token}/cover",
                 'pages': gallery.get('pages')
             })
         
@@ -916,9 +916,6 @@ def gallery_detail(id: str):
         detail = get_gallery_detail_data(gid, token, tuple(headers.items()), url_builder)
         if not detail: return jsonify({'error': '无法获取画廊详情'}), 500
         detail.update({'gid': gid, 'token': token})
-        if 'thumbnail' in detail and detail['thumbnail']: detail['thumbnail_proxy'] = f"{api_url}/image/proxy?url={detail['thumbnail']}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
-
-        print(detail)
         
         total_pages = detail.get('pages') or 0
         total_chapters = max(1, math.ceil(total_pages / VIRTUAL_CHAPTER_SIZE))
@@ -929,7 +926,7 @@ def gallery_detail(id: str):
             'name': detail.get('title'),
             'page_count': total_pages,
             'rate': detail.get('rating'),
-            'cover': detail.get('thumbnail_proxy') or detail.get('thumbnail'),
+            'cover': f"{api_url}/comic/{gid}_{token}/cover",
             'tags': flatten_eh_tags(detail, translate=translate_tags),
             'total_chapters': total_chapters
         }
@@ -967,12 +964,7 @@ def gallery_images(id: str, chapter: str = "1"):
             title = f"{title} - Part {chapter_num}"
 
         api_url = public_url()
-        
-        images = []
-        for img in processed_images:
-            image_url = img.get('image_jpg', '')
-            if image_url:
-                images.append({'url': f"{api_url}{image_url}"})
+        images = [{'url': f"{api_url}/photo/{gid}_{token}/chapter/{chapter_num}/page/{i+1}.jpg"} for i in range(len(processed_images))]
         
         result = {
             'title': title,
@@ -982,33 +974,51 @@ def gallery_images(id: str, chapter: str = "1"):
         return jsonify(result)
     except Exception as e: logging.error(f"路由 /photo 出错: {e}"); return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
 
+@app.get('/comic/<id>/cover')
+def gallery_cover(id: str):
+    gid, token = parse_id(id)
+    if not gid or not token: raise ApiError(400, "无效的 ID 格式")
+    def load():
+        headers, url_builder, _, _ = get_request_context()
+        detail = get_gallery_detail_data(gid, token, tuple(headers.items()), url_builder)
+        thumb = detail.get('thumbnail') if detail else None
+        if not thumb: raise ApiError(404, "封面未找到")
+        resp = requests.get(thumb, headers=dict(headers))
+        if resp.status_code != 200: raise ApiError(502, "封面下载失败")
+        return resp.content
+    return serve(["cover", gid, token], load, 400)
+
+@app.get('/photo/<id>/chapter/<int:chapter>/page/<path:page>')
+@app.get('/photo/<id>/chapter/<int:chapter>/<path:page>')
+def gallery_chapter_page(id: str, chapter: int, page: str):
+    gid, token = parse_id(id)
+    if not gid or not token: raise ApiError(400, "无效的 ID 格式")
+    match = re.fullmatch(r"([1-9]\d*)(?:\.jpg)?", page)
+    if not match: raise ApiError(400, "无效页码")
+    page_num = int(match[1])
+    def load():
+        headers, url_builder, _, _ = get_request_context()
+        items = get_virtual_chapter_images_data(gid, token, chapter, tuple(headers.items()), url_builder)
+        if not items or page_num < 1 or page_num > len(items): raise ApiError(404, "页面不存在")
+        item = items[page_num - 1]
+        page_url = item.get("page_url")
+        if not page_url:
+            img_route = item.get("image_jpg", "")
+            if "url=" in img_route:
+                from urllib.parse import parse_qs, urlsplit
+                page_url = parse_qs(urlsplit(img_route).query).get("url", [""])[0]
+        if not page_url: raise ApiError(502, "图片地址缺失")
+        html = fetch_page_for_request(page_url, dict(headers))
+        img_src = EhParser.parse_image_page(html) if html else None
+        if not img_src: raise ApiError(502, "图片解析失败")
+        resp = requests.get(img_src, headers=dict(headers))
+        if resp.status_code != 200: raise ApiError(502, "图片下载失败")
+        return resp.content
+    return serve(["page", gid, token, chapter, page_num], load)
+
 @app.route('/image/proxy')
 def image_proxy():
-    image_url = request.args.get('url')
-    if not image_url: return jsonify({'error': '缺少图片 URL 参数'}), 400
-    try:
-        headers, _, default_width, default_quality = get_request_context()
-        max_width = int(request.args.get('width') or request.args.get('w') or default_width)
-        quality = int(request.args.get('quality') or request.args.get('q') or default_quality)
-        quality = max(1, min(100, quality))
-        output_format = 'jpeg'
-        if ImageProcessor.is_truthy(request.args.get('ifLVGL', '0')):
-            output_format = 'lvgl'
-        elif ImageProcessor.is_truthy(request.args.get('ifPNG', '0')):
-            output_format = 'png'
-        crop_params = None
-        if 'crop_x' in request.args:
-            try:
-                crop_params = (int(request.args['crop_x']), int(request.args['crop_y']), int(request.args['crop_w']), int(request.args['crop_h']))
-            except (ValueError, KeyError): return jsonify({'error': '无效的切割参数'}), 400
-        
-        result = get_processed_image_data(image_url, tuple(headers.items()), max_width, quality, crop_params, output_format)
-        if not result: return jsonify({'error': '无法下载或处理图片'}), 500
-        
-        image_bytes, info = result
-        response_headers = {"Content-Disposition": "inline", "Content-Length": str(info['file_size']), "X-Image-Original-Size": info['original_size'], "X-Image-Compressed-Size": info['compressed_size'], "Cache-Control": "public, max-age=86400", "Content-Type": info['content_type']}
-        return Response(image_bytes, mimetype=info['content_type'], headers=response_headers)
-    except Exception as e: logging.error(f"路由 /image/proxy 出错: {e}"); return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
+    return cached_proxy()
 
 @app.route('/health')
 def health(): return jsonify({'status': 'ok', 'source': 'E-Hentai', 'client_cookie_provided': bool(request.headers.get('Cookie'))})
@@ -1108,9 +1118,6 @@ def cached_proxy():
             if min(x,y)<0 or min(w,h)<1 or x+w>image.width or y+h>image.height: raise ApiError(400,"无效裁剪范围")
             return image.crop((x,y,x+w,y+h))
     return serve(["proxy",url,crop],load,400)
-
-
-app.view_functions["image_proxy"]=cached_proxy
 
 
 if __name__ == "__main__":
