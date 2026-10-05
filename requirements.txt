@@ -1,6 +1,7 @@
 flask
 requests
 beautifulsoup4
-Pillow
+Pillow>=12,<13
 cachetools
-gunicorn
+gunicorn>=23,<26; sys_platform != 'win32'
+redis>=5,<7

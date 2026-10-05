@@ -328,3 +328,6 @@ ifLVGL=1 > ifPNG=1 > 默认 JPEG
 ## ⚖️ 许可
 
 本软件根据 **GNU Affero General Public License v3.0** 许可。详情请参阅 `LICENSE` 文件。
+# 三平台部署更新
+
+用户/站点隔离、惰性逐页解析与部署参数见 [部署说明](docs/DEPLOYMENT.md)。
