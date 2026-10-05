@@ -837,11 +837,14 @@ def home():
     except Exception as e: logging.error(f"路由 / 出错: {e}"); return jsonify({'error': f'服务器错误: {str(e)}'}), 500
 
 @app.route('/search')
-def search():
+@app.route('/search/<path:text>')
+@app.route('/search/<path:text>/<int:page>')
+def search(text=None, page=None):
     try:
         headers, url_builder, default_width, default_quality = get_request_context()
-        search_keyword = request.args.get('q', '')
-        page = int(request.args.get('page', 1) or 1)
+        search_keyword = text or request.args.get('q', '')
+        if page is None:
+            page = int(request.args.get('page', 1) or 1)
 
         keyword = decode_search_value(search_keyword)
         print(f"原始值: {search_keyword}, 解码后: {keyword}")
@@ -938,6 +941,8 @@ def gallery_detail(id: str):
 @app.route('/photo/<id>/')
 @app.route('/photo/<id>/<chapter>')
 @app.route('/photo/<id>/<chapter>/')
+@app.route('/photo/<id>/chapter/<chapter>')
+@app.route('/photo/<id>/chapter/<chapter>/')
 def gallery_images(id: str, chapter: str = "1"):
     try:
         gid, token = parse_id(id)
@@ -1006,7 +1011,7 @@ def image_proxy():
     except Exception as e: logging.error(f"路由 /image/proxy 出错: {e}"); return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
 
 @app.route('/health')
-def health(): return jsonify({'status': 'ok', 'client_cookie_provided': bool(request.headers.get('Cookie'))})
+def health(): return jsonify({'status': 'ok', 'source': 'E-Hentai', 'client_cookie_provided': bool(request.headers.get('Cookie'))})
         
 @app.get("/config")
 @app.get("/config/")
@@ -1017,10 +1022,11 @@ def config():
             "E-Hentai": {
                 "name": "E-Hentai",
                 "apiUrl": api_url,
-                "searchPath": "/search?q=<text>&page=<page>",
-                "photoPath": "/photo/<id>/<chapter>",
+                "searchPath": "/search/<text>/<page>",
+                "photoPath": "/photo/<id>/chapter/<chapter>",
                 "detailPath": "/comic/<id>",
                 "type": "ehentai",
+                "idType": "gid_token",
             },
         }
     )
